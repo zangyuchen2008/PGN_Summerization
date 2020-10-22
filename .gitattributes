@@ -1,3 +1,4 @@
 *.csv filter=lfs diff=lfs merge=lfs -text
 *.txt filter=lfs diff=lfs merge=lfs -text
 *.data-00000-of-00001 filter=lfs diff=lfs merge=lfs -text
+ckpt/pgn/checkpoint/ckpt-1.data-00000-of-00001 filter=lfs diff=lfs merge=lfs -text
