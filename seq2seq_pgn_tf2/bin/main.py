@@ -44,7 +44,7 @@ def main():
     parser.add_argument('--cov_loss_wt', default=0.5, help='Weight of coverage loss (lambda in the paper).'
                                                            ' If zero, then no incentive to minimize coverage loss.',
                         type=float)
-    parser.add_argument("--repetition_penalty", default=4, help="penaty when decoding for repetition token",
+    parser.add_argument("--repetition_penalty", default=1, help="penaty when decoding for repetition token",
                         type=float)
     parser.add_argument("--no_repeat_ngram_size", default=0, help="penaty when decoding for repetition ngram",
                         type=float)
