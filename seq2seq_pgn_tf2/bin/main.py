@@ -44,7 +44,9 @@ def main():
     parser.add_argument('--cov_loss_wt', default=0.5, help='Weight of coverage loss (lambda in the paper).'
                                                            ' If zero, then no incentive to minimize coverage loss.',
                         type=float)
-    parser.add_argument("--repetition_penalty", default=1, help="penaty when decoding for repetition token",
+    parser.add_argument("--repetition_penalty", default=4, help="penaty when decoding for repetition token",
+                        type=float)
+    parser.add_argument("--no_repeat_ngram_size", default=0, help="penaty when decoding for repetition ngram",
                         type=float)
 
     # path
@@ -65,7 +67,7 @@ def main():
     parser.add_argument("--steps_per_epoch", default=8087, help="max_train_steps", type=int)
     parser.add_argument("--checkpoints_save_steps", default=10, help="Save checkpoints every N steps", type=int)
     parser.add_argument("--max_steps", default=10000, help="Max number of iterations", type=int)
-    parser.add_argument("--num_to_test", default=20, help="Number of examples to test", type=int)
+    parser.add_argument("--num_to_test", default=10, help="Number of examples to test", type=int)
     parser.add_argument("--max_num_to_eval", default=5, help="max_num_to_eval", type=int)
     parser.add_argument("--epochs", default=20, help="train epochs", type=int)
     

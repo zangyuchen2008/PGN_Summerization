@@ -62,6 +62,34 @@ def _create_next_token_logits_penalties(input_ids, logits, repetition_penalty):
         np.put(token_penalties[i], prev_input_id, logit_penalties)
     return tf.convert_to_tensor(token_penalties, dtype=tf.float32)
 
+def calc_banned_ngram_tokens(prev_input_ids, num_hypos, no_repeat_ngram_size, cur_len):
+    # Copied from fairseq for no_repeat_ngram in beam_search"""
+    if cur_len + 1 < no_repeat_ngram_size:
+        # return no banned tokens if we haven't generated no_repeat_ngram_size tokens yet
+        return [[] for _ in range(num_hypos)]
+    generated_ngrams = [{} for _ in range(num_hypos)]
+    for idx in range(num_hypos):
+        gen_tokens = prev_input_ids[idx].numpy().tolist()
+        generated_ngram = generated_ngrams[idx]
+        for ngram in zip(*[gen_tokens[i:] for i in range(no_repeat_ngram_size)]):
+            prev_ngram_tuple = tuple(ngram[:-1])
+            generated_ngram[prev_ngram_tuple] = generated_ngram.get(prev_ngram_tuple, []) + [ngram[-1]]
+
+    def _get_generated_ngrams(hypo_idx):
+        # Before decoding the next token, prevent decoding of ngrams that have already appeared
+        start_idx = cur_len + 2 - no_repeat_ngram_size
+        ngram_idx = tuple(prev_input_ids[hypo_idx, start_idx:cur_len + 1].numpy().tolist())
+        return generated_ngrams[hypo_idx].get(ngram_idx, [])
+
+    banned_tokens = [_get_generated_ngrams(hypo_idx) for hypo_idx in range(num_hypos)]
+    return banned_tokens
+
+def set_tensor_by_indices_to_value(tensor, indices, value):
+    # create value_tensor since tensor value assignment is not possible in TF
+    value_tensor = tf.zeros_like(tensor) + value
+    return tf.where(indices, value_tensor, tensor)
+
+
 def shape_list(x):
     """Deal with dynamic shape in tensorflow cleanly."""
     static = x.shape.as_list()
@@ -72,7 +100,7 @@ def shape_list(x):
 def beam_decode(model, batch, vocab, params):
 
     def decode_onestep(enc_inp, enc_outputs, dec_input, dec_input_ids,dec_state, enc_extended_inp,
-                       batch_oov_len, enc_pad_mask, use_coverage, prev_coverage,repetition_penalty):
+                       batch_oov_len, enc_pad_mask, use_coverage, prev_coverage,repetition_penalty,no_repeat_ngram_size,steps):
         """
             Method to decode the output step by step (used for beamSearch decoding)
             Args:
@@ -97,6 +125,7 @@ def beam_decode(model, batch, vocab, params):
                         prev_coverage,# shape=(3, 115, 1)
                         )  
         final_dists=outputs["logits"]
+        # repetition penalty (from CTRL paper https://arxiv.org/abs/1909.05858)
         if repetition_penalty != 1:
             final_dists = tf.squeeze(final_dists,axis=1)
             next_token_logits_penalties = _create_next_token_logits_penalties(dec_input_ids, 
@@ -106,6 +135,26 @@ def beam_decode(model, batch, vocab, params):
             final_dists = tf.nn.log_softmax(next_token_logits, axis=-1)
             final_dists = tf.expand_dims(final_dists,axis=1)
 
+        if no_repeat_ngram_size > 0:
+            # calculate a list of banned tokens to prevent repetitively generating the same ngrams
+            # from fairseq: https://github.com/pytorch/fairseq/blob/a07cb6f40480928c9e0548b737aadd36ee66ac76/fairseq/sequence_generator.py#L345
+            final_dists = tf.squeeze(final_dists,axis=1)
+            num_batch_hypotheses = dec_input_ids.shape[0]
+            banned_tokens = calc_banned_ngram_tokens(
+                dec_input_ids, num_batch_hypotheses, no_repeat_ngram_size, steps
+            )
+            # create banned_tokens boolean mask
+            banned_tokens_indices_mask = []
+            vocab_size = final_dists[0].shape[0]
+            for banned_tokens_slice in banned_tokens:
+                banned_tokens_indices_mask.append(
+                    [True if token in banned_tokens_slice else False for token in range(vocab_size)]
+                )
+            final_dists = set_tensor_by_indices_to_value(
+                final_dists, tf.convert_to_tensor(banned_tokens_indices_mask, dtype=tf.bool), -float("inf")
+            )
+            final_dists = tf.expand_dims(final_dists,axis=1)
+        
 
         dec_hidden=outputs["dec_hidden"]
         attentions=outputs["attentions"]
@@ -169,7 +218,10 @@ def beam_decode(model, batch, vocab, params):
                                  batch[0]['sample_encoder_pad_mask'],  # shape=(3, 115)
                                  params['is_coverage'],  # true
                                  prev_coverage=None,
-                                 repetition_penalty= params['repetition_penalty'])  
+                                 repetition_penalty= params['repetition_penalty'],
+                                 no_repeat_ngram_size = params['no_repeat_ngram_size'],
+                                 steps=steps
+                                 )  
         topk_ids, topk_log_probs, new_states, attn_dists, p_gens, new_coverage= returns['top_k_ids'],\
                                                                     returns['top_k_log_probs'],\
                                                                                    returns['dec_state'],\

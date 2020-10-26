@@ -70,7 +70,7 @@ def test_and_save(params):
     results = []
     with tqdm(total=params["num_to_test"], position=0, leave=True) as pbar:
         for i in range(params["num_to_test"]):
-            trial = next(gen)
+            trial = next(gen) 
             results.append(trial.abstract)
             pbar.update(1)
     return results
