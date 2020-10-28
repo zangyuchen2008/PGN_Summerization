@@ -46,9 +46,14 @@ def main():
                         type=float)
     parser.add_argument("--repetition_penalty", default=1, help="penaty when decoding for repetition token",
                         type=float)
-    parser.add_argument("--no_repeat_ngram_size", default=0, help="penaty when decoding for repetition ngram",
+    parser.add_argument("--no_repeat_ngram_size", default=2, help="penaty when decoding for repetition ngram",
                         type=float)
-
+    parser.add_argument("--do_sample", default=1, help="sample for diverse generation",
+                        type=int)                        
+    parser.add_argument("--top_k", default=0, help="filter top k tokens for sampling during each decoding step",
+                        type=int)
+    parser.add_argument("--top_p", default=0.0001, help="filter top p tokens for sampling during each decoding step",
+                        type=float)
     # path
     # /ckpt/checkpoint/checkpoint
     parser.add_argument("--seq2seq_model_dir", default='{}/ckpt/seq2seq'.format(BASE_DIR), help="Model folder")
@@ -67,7 +72,7 @@ def main():
     parser.add_argument("--steps_per_epoch", default=8087, help="max_train_steps", type=int)
     parser.add_argument("--checkpoints_save_steps", default=10, help="Save checkpoints every N steps", type=int)
     parser.add_argument("--max_steps", default=10000, help="Max number of iterations", type=int)
-    parser.add_argument("--num_to_test", default=10, help="Number of examples to test", type=int)
+    parser.add_argument("--num_to_test", default=2, help="Number of examples to test", type=int)
     parser.add_argument("--max_num_to_eval", default=5, help="max_num_to_eval", type=int)
     parser.add_argument("--epochs", default=20, help="train epochs", type=int)
     

@@ -48,6 +48,88 @@ class Hypothesis:
     def avg_log_prob(self):
         return self.tot_log_prob / len(self.tokens)
 
+# top_k top_p filtering
+def tf_top_k_top_p_filtering(logits, top_k=0, top_p=1.0, filter_value=-float("Inf"), min_tokens_to_keep=1):
+    """Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
+    Args:
+        logits: logits distribution shape (batch size, vocabulary size)
+        if top_k > 0: keep only top k tokens with highest probability (top-k filtering).
+        if top_p < 1.0: keep the top tokens with cumulative probability >= top_p (nucleus filtering).
+            Nucleus filtering is described in Holtzman et al. (http://arxiv.org/abs/1904.09751)
+        Make sure we keep at least min_tokens_to_keep per batch example in the output
+    From: https://gist.github.com/thomwolf/1a5a29f6962089e871b94cbd09daf317
+    """
+    logits_shape = shape_list(logits)
+
+    if top_k > 0:
+        top_k = min(max(top_k, min_tokens_to_keep), logits_shape[-1])  # Safety check
+        # Remove all tokens with a probability less than the last token of the top-k
+        indices_to_remove = logits < tf.math.top_k(logits, k=top_k)[0][..., -1, None]
+        logits = set_tensor_by_indices_to_value(logits, indices_to_remove, filter_value)
+
+    if top_p < 1.0:
+        sorted_indices = tf.argsort(logits, direction="DESCENDING")
+        sorted_logits = tf.gather(
+            logits, sorted_indices, axis=-1, batch_dims=1
+        )  # expects logits to be of dim (batch_size, vocab_size)
+
+        cumulative_probs = tf.math.cumsum(tf.nn.softmax(sorted_logits, axis=-1), axis=-1)
+
+        # Remove tokens with cumulative probability above the threshold (token with 0 are kept)
+        sorted_indices_to_remove = cumulative_probs > top_p
+
+        if min_tokens_to_keep > 1:
+            # Keep at least min_tokens_to_keep (set to min_tokens_to_keep-1 because we add the first one below)
+            sorted_indices_to_remove = tf.concat(
+                [
+                    tf.zeros_like(sorted_indices_to_remove[:, :min_tokens_to_keep]),
+                    sorted_indices_to_remove[:, min_tokens_to_keep:],
+                ],
+                -1,
+            )
+
+        # Shift the indices to the right to keep also the first token above the threshold
+        sorted_indices_to_remove = tf.roll(sorted_indices_to_remove, 1, axis=-1)
+        sorted_indices_to_remove = tf.concat(
+            [tf.zeros_like(sorted_indices_to_remove[:, :1]), sorted_indices_to_remove[:, 1:]],
+            -1,
+        )
+        # scatter sorted tensors to original indexing
+        indices_to_remove = scatter_values_on_batch_indices(sorted_indices_to_remove, sorted_indices)
+        logits = set_tensor_by_indices_to_value(logits, indices_to_remove, filter_value)
+    return logits
+
+def sample_without_replacement(logits, num_samples):
+    """
+    categorical sampling witouth replacement is currently not implemented
+    the gumbel-max trick will do for now
+    see https://github.com/tensorflow/tensorflow/issues/9260 for more info
+    """
+    z = -tf.math.log(tf.random.uniform(shape_list(logits), 0, 1))
+    _, indices = tf.nn.top_k(logits + z, num_samples)
+    return indices
+
+def shape_list(x):
+    """Deal with dynamic shape in tensorflow cleanly."""
+    static = x.shape.as_list()
+    dynamic = tf.shape(x)
+    return [dynamic[i] if s is None else s for i, s in enumerate(static)]
+
+def set_tensor_by_indices_to_value(tensor, indices, value):
+    # create value_tensor since tensor value assignment is not possible in TF
+    value_tensor = tf.zeros_like(tensor) + value
+    return tf.where(indices, value_tensor, tensor)
+
+
+def scatter_values_on_batch_indices(values, batch_indices):
+    shape = shape_list(batch_indices)
+    # broadcast batch dim to shape
+    broad_casted_batch_dims = tf.reshape(tf.broadcast_to(tf.expand_dims(tf.range(shape[0]), axis=-1), shape), [1, -1])
+    # transform batch_indices to pair_indices
+    pair_indices = tf.transpose(tf.concat([broad_casted_batch_dims, tf.reshape(batch_indices, [1, -1])], 0))
+    # scatter values to pair indices
+    return tf.scatter_nd(pair_indices, tf.reshape(values, [-1]), shape)
+
 # repetition penalty (from CTRL paper https://arxiv.org/abs/1909.05858) 
 def _create_next_token_logits_penalties(input_ids, logits, repetition_penalty):
     # create logit penalties for already seen input_ids
@@ -84,23 +166,13 @@ def calc_banned_ngram_tokens(prev_input_ids, num_hypos, no_repeat_ngram_size, cu
     banned_tokens = [_get_generated_ngrams(hypo_idx) for hypo_idx in range(num_hypos)]
     return banned_tokens
 
-def set_tensor_by_indices_to_value(tensor, indices, value):
-    # create value_tensor since tensor value assignment is not possible in TF
-    value_tensor = tf.zeros_like(tensor) + value
-    return tf.where(indices, value_tensor, tensor)
 
-
-def shape_list(x):
-    """Deal with dynamic shape in tensorflow cleanly."""
-    static = x.shape.as_list()
-    dynamic = tf.shape(x)
-    return [dynamic[i] if s is None else s for i, s in enumerate(static)]
 
 # beam search
 def beam_decode(model, batch, vocab, params):
 
     def decode_onestep(enc_inp, enc_outputs, dec_input, dec_input_ids,dec_state, enc_extended_inp,
-                       batch_oov_len, enc_pad_mask, use_coverage, prev_coverage,repetition_penalty,no_repeat_ngram_size,steps):
+                       batch_oov_len, enc_pad_mask, use_coverage, prev_coverage,steps):
         """
             Method to decode the output step by step (used for beamSearch decoding)
             Args:
@@ -126,22 +198,22 @@ def beam_decode(model, batch, vocab, params):
                         )  
         final_dists=outputs["logits"]
         # repetition penalty (from CTRL paper https://arxiv.org/abs/1909.05858)
-        if repetition_penalty != 1:
+        if params['repetition_penalty'] != 1:
             final_dists = tf.squeeze(final_dists,axis=1)
             next_token_logits_penalties = _create_next_token_logits_penalties(dec_input_ids, 
             final_dists, 
-            repetition_penalty)
+            params['repetition_penalty'])
             next_token_logits = tf.math.multiply(final_dists, next_token_logits_penalties)
             final_dists = tf.nn.log_softmax(next_token_logits, axis=-1)
             final_dists = tf.expand_dims(final_dists,axis=1)
 
-        if no_repeat_ngram_size > 0:
+        if params['no_repeat_ngram_size'] > 0:
             # calculate a list of banned tokens to prevent repetitively generating the same ngrams
             # from fairseq: https://github.com/pytorch/fairseq/blob/a07cb6f40480928c9e0548b737aadd36ee66ac76/fairseq/sequence_generator.py#L345
             final_dists = tf.squeeze(final_dists,axis=1)
             num_batch_hypotheses = dec_input_ids.shape[0]
             banned_tokens = calc_banned_ngram_tokens(
-                dec_input_ids, num_batch_hypotheses, no_repeat_ngram_size, steps
+                dec_input_ids, num_batch_hypotheses, params['no_repeat_ngram_size'], steps
             )
             # create banned_tokens boolean mask
             banned_tokens_indices_mask = []
@@ -161,10 +233,26 @@ def beam_decode(model, batch, vocab, params):
         coverages=outputs["coverages"]
         p_gens=outputs["p_gens"]
 
-        # final_dists shape=(3, 1, 30000)
-        # top_k_probs shape=(3, 6)
-        # top_k_ids shape=(3, 6)
-        top_k_probs, top_k_ids = tf.nn.top_k(tf.squeeze(final_dists), k=params["beam_size"] * 2)
+        if params['do_sample']:
+            final_dists = tf.squeeze(final_dists,axis=1)
+        # Top-p/top-k filtering
+            _scores = tf_top_k_top_p_filtering(
+                final_dists, top_k= params['top_k'], top_p=params['top_p'], min_tokens_to_keep=2
+            )  # (batch_size * num_beams, vocab_size)
+            # Sample 2 next tokens for each beam (so we have some spare tokens and match output of greedy beam search)
+            # _scores = tf.reshape(_scores, (batch_size, num_beams * vocab_size))
+            next_tokens = sample_without_replacement(
+                _scores, num_samples = params["beam_size"] * 2
+            )  # (batch_size, 2 * num_beams)
+            # Compute next scores
+            next_scores = tf.gather(_scores, next_tokens, batch_dims=1)  # (batch_size, 2 * num_beams)
+
+            # sort the sampled vector to make sure that the first num_beams samples are the best
+            next_scores_indices = tf.argsort(next_scores, direction="DESCENDING", axis=1)
+            top_k_probs = tf.gather(next_scores, next_scores_indices, batch_dims=1)  # (batch_size, num_beams * 2)
+            top_k_ids = tf.gather(next_tokens, next_scores_indices, batch_dims=1)  # (batch_size, num_beams * 2)
+        else:
+            top_k_probs, top_k_ids = tf.nn.top_k(tf.squeeze(final_dists), k=params["beam_size"] * 2)
         top_k_log_probs = tf.math.log(top_k_probs)
         # dec_hidden shape = (3, 256)
         # attentions, shape = (3, 115)
@@ -218,8 +306,6 @@ def beam_decode(model, batch, vocab, params):
                                  batch[0]['sample_encoder_pad_mask'],  # shape=(3, 115)
                                  params['is_coverage'],  # true
                                  prev_coverage=None,
-                                 repetition_penalty= params['repetition_penalty'],
-                                 no_repeat_ngram_size = params['no_repeat_ngram_size'],
                                  steps=steps
                                  )  
         topk_ids, topk_log_probs, new_states, attn_dists, p_gens, new_coverage= returns['top_k_ids'],\
