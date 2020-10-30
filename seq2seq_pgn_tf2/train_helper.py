@@ -1,14 +1,20 @@
 import tensorflow as tf
 import time
 from seq2seq_pgn_tf2.utils.losses import loss_function
-
+from seq2seq_pgn_tf2.models.pgn import PGN
+from seq2seq_pgn_tf2.test_helper import beam_decode
+from seq2seq_pgn_tf2.batcher import batcher, Vocab
+from rouge import Rouge
+from tqdm import tqdm
 
 def train_model(model, dataset, params, ckpt, ckpt_manager):
-    # optimizer = tf.keras.optimizers.Adagrad(params['learning_rate'],
-    #                                         initial_accumulator_value=params['adagrad_init_acc'],
-    #                                         clipnorm=params['max_grad_norm'])
     optimizer = tf.keras.optimizers.Adam(name='Adam', learning_rate=params["learning_rate"])
-
+    # open validation y_data
+    with open(params["valid_seg_y_dir"],'r') as f:
+        valid_targets=f.readlines()
+        valid_targets = valid_targets[:params['num_to_valid']]
+    val_params = params.copy()
+    rouge = Rouge()
     # @tf.function()
     def train_step(enc_inp, enc_extended_inp, dec_inp, dec_tar, batch_oov_len, enc_padding_mask, padding_mask):
         # loss = 0
@@ -54,7 +60,6 @@ def train_model(model, dataset, params, ckpt, ckpt_manager):
                               batch[0]["max_oov_len"],  # ()
                               batch[0]["sample_encoder_pad_mask"],  # shape=(16, 200)
                               batch[1]["sample_decoder_pad_mask"])  # shape=(16, 50)
-
             step += 1
             total_loss += loss
             if step % 100 == 0:
@@ -68,4 +73,37 @@ def train_model(model, dataset, params, ckpt, ckpt_manager):
                 print('Saving checkpoint for epoch {} at {} ,best loss {}'.format(epoch + 1, ckpt_save_path, best_loss))
                 print('Epoch {} Loss {:.4f}'.format(epoch + 1, total_loss / step))
                 print('Time taken for 1 epoch {} sec\n'.format(time.time() - t0))
+    results = valid(val_params)
+    scores_avg = rouge.get_scores(results, valid_targets, avg=True)
+    print('validated average rouge score is:',scores_avg)
 
+def valid(params):
+    params['mode'] = 'test'
+    params['batch_size'] = params['beam_size']
+
+    print("Building the model ...")
+    model = PGN(params)
+
+    print("Creating the vocab ...")
+    vocab = Vocab(params["vocab_path"], params["vocab_size"])
+
+    print("Creating the batcher ...")
+    params['test_seg_x_dir']= params["valid_seg_x_dir"]
+    b = batcher(vocab, params)
+
+    print("Creating the checkpoint manager")
+    checkpoint_dir = "{}/checkpoint".format(params["pgn_model_dir"])
+    ckpt = tf.train.Checkpoint(PGN=model)
+    ckpt_manager = tf.train.CheckpointManager(ckpt, checkpoint_dir, max_to_keep=5)
+
+    # path = params["model_path"] if params["model_path"] else ckpt_manager.latest_checkpoint
+    # path = ckpt_manager.latest_checkpoint
+    ckpt.restore(ckpt_manager.latest_checkpoint)
+    print("Model restored")
+    results=[]
+    b_iter = iter(b)
+    print("start to validate*********")
+    for _ in tqdm(range(params['num_to_valid'])):
+        batch = next(b_iter)
+        results.append(beam_decode(model, batch, vocab, params).abstract)
+    return results
